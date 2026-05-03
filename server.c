@@ -1,12 +1,13 @@
 /*
- * server.c - Servidor de mensajeria (Parte 1)
+ * server.c - Servidor de mensajeria (Parte 1 + Parte 2: ficheros adjuntos)
  * Sistemas Distribuidos - UC3M
  *
  * Servidor concurrente multihilo que gestiona:
  *  - Registro/baja de usuarios
  *  - Conexion/desconexion
- *  - Envio y almacenamiento de mensajes pendientes
- *  - Listado de usuarios conectados
+ *  - Envio y almacenamiento de mensajes pendientes (con y sin fichero adjunto)
+ *  - Listado de usuarios conectados (devuelve IP y puerto por usuario)
+ *  - Transferencia de ficheros entre clientes (via GET_FILE al hilo de escucha)
  *
  * Almacenamiento: listas enlazadas dinamicas con malloc/free
  * Protocolo: sockets TCP, cadenas terminadas en '\0', un byte de respuesta
@@ -27,6 +28,7 @@
 /* ===================== CONSTANTES ===================== */
 #define MAX_NAME     256
 #define MAX_MSG_TEXT 256
+#define MAX_FILENAME 256
 #define MAX_IP       64
 
 /* ===================== ESTRUCTURAS ===================== */
@@ -51,12 +53,16 @@ typedef struct NodoUsuario {
 /*
  * Nodo de la lista enlazada de mensajes pendientes.
  * Cada nodo almacena un mensaje pendiente de entrega.
+ * El campo filename estara vacio si el mensaje no tiene adjunto.
+ * El campo tiene_adjunto indica si es un SENDATTACH o un SEND normal.
  */
 typedef struct NodoMensaje {
-    char             destino[MAX_NAME];   /* usuario destinatario */
-    char             remitente[MAX_NAME]; /* usuario que lo envio */
-    unsigned int     id;                  /* identificador del mensaje */
-    char             texto[MAX_MSG_TEXT]; /* contenido del mensaje */
+    char             destino[MAX_NAME];        /* usuario destinatario */
+    char             remitente[MAX_NAME];      /* usuario que lo envio */
+    unsigned int     id;                       /* identificador del mensaje */
+    char             texto[MAX_MSG_TEXT];      /* contenido del mensaje */
+    char             filename[MAX_FILENAME];   /* nombre del fichero adjunto (puede ser "") */
+    int              tiene_adjunto;            /* 1 si es SENDATTACH, 0 si es SEND */
     struct NodoMensaje *siguiente;
 } NodoMensaje;
 
@@ -154,8 +160,7 @@ int enviar_byte(int sock, unsigned char valor) {
 
 /* ===================== GESTION DE LA LISTA DE USUARIOS ===================== */
 
-
- //buscamos a un usuario por nombre en la lista enlazada y devuelve un puntero hacia el o null y se debe llamar con el mutex_usuarios ya puesto
+//buscamos a un usuario por nombre en la lista enlazada y devuelve un puntero hacia el o null
 NodoUsuario *buscar_usuario(const char *nombre) {
     NodoUsuario *actual = lista_usuarios;
     while (actual != NULL) {
@@ -166,9 +171,7 @@ NodoUsuario *buscar_usuario(const char *nombre) {
     return NULL;
 }
 
-
-
- //creo un nuevo nodo de usuario y lo inserto al princpio de la lista
+//creo un nuevo nodo de usuario y lo inserto al princpio de la lista
 NodoUsuario *insertar_usuario(const char *nombre) {
     NodoUsuario *nuevo = malloc(sizeof(NodoUsuario));
     if (nuevo == NULL) return NULL;
@@ -184,8 +187,7 @@ NodoUsuario *insertar_usuario(const char *nombre) {
     return nuevo;
 }
 
-
- //elimino al usaurio y libero su memoria 
+//elimino al usaurio y libero su memoria 
 int eliminar_usuario(const char *nombre) {
     NodoUsuario *actual   = lista_usuarios;
     NodoUsuario *anterior = NULL;
@@ -206,49 +208,44 @@ int eliminar_usuario(const char *nombre) {
     return -1;
 }
 
-/* ===================== GESTION DE LA LISTA DE MENSAJES ===================== */
 
-/*
- * Crea un nuevo nodo de mensaje e inserta al inicio de la lista.
- * Devuelve el puntero al nuevo nodo, o NULL si falla el malloc.
- * PRECONDICION: debe llamarse con mutex_mensajes tomado.
- */
-NodoMensaje *insertar_mensaje(const char *destino,const char *remitente,unsigned int id,const char *texto) {
+//gestion de la lista de mensajes
 
-    NodoMensaje *nuevo = malloc(sizeof(NodoMensaje));//creo un nodo nuevo que actua como mensaje
-    if (nuevo == NULL){
-        return NULL;/*si da fallo el malloc*/
-    } 
+//creo un nuevo nodo de mensaje e inserto al princpio de la lista
+NodoMensaje *insertar_mensaje(const char *destino, const char *remitente,
+                               unsigned int id, const char *texto,
+                               const char *filename, int tiene_adjunto) {
 
-    strncpy(nuevo->destino,   destino,   MAX_NAME - 1);//copia el destino dentro del nodo
-    strncpy(nuevo->remitente, remitente, MAX_NAME - 1);//copia el remitente dentro del nodo
-    strncpy(nuevo->texto,     texto,     MAX_MSG_TEXT - 1);//copia el texto del mensaje dentro del nodo
-    nuevo->destino[MAX_NAME - 1]     = '\0';//pongo un \0 por si es un elemento mayor que 255 letras para que termine siendo un 0
-    nuevo->remitente[MAX_NAME - 1]   = '\0';//pongo un \0 por si es un elemento mayor que 255 letras para que termine siendo un 0
-    nuevo->texto[MAX_MSG_TEXT - 1]   = '\0';//pongo un \0 por si es un elemento mayor que 255 letras para que termine siendo un 0
-    nuevo->id        = id;//copio el id del mensaje dentro dle nodo
-    nuevo->siguiente = lista_mensajes;//inserto el nodo en la lista 
-    lista_mensajes   = nuevo;//hago que la lista apunte a este nodo 
+    NodoMensaje *nuevo = malloc(sizeof(NodoMensaje));
+    if (nuevo == NULL) return NULL;
+
+    strncpy(nuevo->destino,   destino,   MAX_NAME - 1);
+    strncpy(nuevo->remitente, remitente, MAX_NAME - 1);
+    strncpy(nuevo->texto,     texto,     MAX_MSG_TEXT - 1);
+    strncpy(nuevo->filename,  filename,  MAX_FILENAME - 1);
+    nuevo->destino[MAX_NAME - 1]     = '\0';//pongo un \0 por si es un elemento mayor
+    nuevo->remitente[MAX_NAME - 1]   = '\0';//pongo un \0 por si es un elemento mayor
+    nuevo->texto[MAX_MSG_TEXT - 1]   = '\0';//pongo un \0 por si es un elemento mayor
+    nuevo->filename[MAX_FILENAME - 1] = '\0';//pongo un \0 por si es un elemento mayor
+    nuevo->id             = id;
+    nuevo->tiene_adjunto  = tiene_adjunto;
+    nuevo->siguiente      = lista_mensajes;//inserto el nodo en la lista 
+    lista_mensajes        = nuevo;//hago que la lista apunte a este nodo
     return nuevo;
 }
 
-/*
- * Elimina el nodo de mensaje con ese id y ese destino de la lista y libera su memoria.
- * Devuelve 0 si se elimino, -1 si no se encontro.
- * PRECONDICION: debe llamarse con mutex_mensajes tomado.
- */
+//elimino el nodo de mensaje con ese id y destino
 int eliminar_mensaje(const char *destino, unsigned int id) {
-    NodoMensaje *actual   = lista_mensajes; 
+    NodoMensaje *actual   = lista_mensajes;
     NodoMensaje *anterior = NULL;
 
     while (actual != NULL) {
-        if (actual->id == id && strcmp(actual->destino, destino) == 0) {//busco el mensaje con el id que quiero borrar a la persona q se lo he enviado
-            if (anterior == NULL){
+        if (actual->id == id && strcmp(actual->destino, destino) == 0) {
+            if (anterior == NULL)
                 lista_mensajes = actual->siguiente;//si es el primero solo se hace que se apunte la lista al siguiente
-            }
             else
                 anterior->siguiente = actual->siguiente;//si no es el primero se salta ese nodo que se quiere borrar
-            free(actual);//lo borro con free ya que lo habia reservado con malloc
+            free(actual);
             return 0;
         }
         //y esto para cuando no sea el nodo q busco paso al siguiente
@@ -258,38 +255,28 @@ int eliminar_mensaje(const char *destino, unsigned int id) {
     return -1;
 }
 
-/*
- * Elimina todos los mensajes pendientes cuyo destino sea 'nombre'.
- * Se llama cuando un usuario se da de baja (UNREGISTER).
- */
+//elimino todos los mensajes pendientes cuyo destino sea nombre
 void eliminar_mensajes_de(const char *nombre) {
     NodoMensaje *actual   = lista_mensajes;
     NodoMensaje *anterior = NULL;
 
     while (actual != NULL) {
-        if (strcmp(actual->destino, nombre) == 0) {//compruebas que es de la persona que se ha dado de baja
+        if (strcmp(actual->destino, nombre) == 0) {//busco el mensaje con el id que quiero borrar a la persona q se lo he enviado
             NodoMensaje *aborrar = actual;//lo asignas para luego borrar esta direccion de memoria porque es del nodo que no quieres
             if (anterior == NULL)
                 lista_mensajes = actual->siguiente;
             else
                 anterior->siguiente = actual->siguiente;
-            actual = actual->siguiente;//aqui saltas al siguiente nodo porque quieres buscar mas de uno
+            actual = actual->siguiente;
             free(aborrar);//aqui borras el nodo del destinatario
-        } else {//si no lo encuentras sigues para adelante
+        } else {
             anterior = actual;
             actual   = actual->siguiente;
         }
     }
 }
 
-/* ===================== OBTENCION DE IP LOCAL ===================== */
-
-/*
- * Obtiene la IP local de la primera interfaz que no sea loopback.
- * Si no encuentra ninguna, devuelve "127.0.0.1".
- */
-
- //obtengo la IP local de la primera interfaz que no sea un loopback , si no encuentro ninguna ip ps se devuelve 127.0.0.1
+//obtengo la IP local de la primera interfaz que no sea un loopback , si no encuentro ninguna ip ps se devuelve 127.0.0.1
 void obtener_ip_local(char *ip_buf, size_t len) {
     struct ifaddrs *ifaddr, *ifa;//inicializo mi futura lista de interfaces de red y el puntero para moverme en ella
     if (getifaddrs(&ifaddr) == -1) {//aqui creo la lista
@@ -297,33 +284,25 @@ void obtener_ip_local(char *ip_buf, size_t len) {
         return;
     }
     strncpy(ip_buf, "127.0.0.1", len);
-    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {//aqui recororo todas las interfaces de la red
-        if (ifa->ifa_addr == NULL) continue;//si no tiene direccion nada
-        if (ifa->ifa_addr->sa_family != AF_INET) continue;//solo me vale ipv4
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL) continue;
+        if (ifa->ifa_addr->sa_family != AF_INET) continue;
         struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;//aqui le indico que es una estructura de ipv4 para que la trate como tal
         char tmp[INET_ADDRSTRLEN];//reservo espacio para guardar la ip como string podria poner 16 tb
-        inet_ntop(AF_INET, &sa->sin_addr, tmp, sizeof(tmp));//aqui cambio a ip en texto
+        inet_ntop(AF_INET, &sa->sin_addr, tmp, sizeof(tmp));
         if (strcmp(tmp, "127.0.0.1") != 0) {//aqui si da no es igual que el host lo  copio en el ip_buf
             strncpy(ip_buf, tmp, len);
             break;
         }
     }
-    freeifaddrs(ifaddr);//liberas la lista de ips
+    freeifaddrs(ifaddr);//libero la lista de ips
 }
 
-/* ===================== ENVIO DE MENSAJES A CLIENTES ===================== */
-
-/*
- * Conecta al hilo de escucha del cliente destinatario y le envia
- * el mensaje siguiendo el protocolo 8.6 (SEND_MESSAGE).
- * Devuelve 0 si se entrego con exito, -1 si fallo.
- */
-
- //envio el mensaje hacia el cliente que me pide cuando hago el send , usando un socket
-int enviar_mensaje_a_cliente(const char *ip, int puerto,const char *remitente,unsigned int id,const char *texto) {
+//envio el mensaje hacia el cliente que me pide cuando hago el send , usando un socket
+int enviar_mensaje_a_cliente(const char *ip, int puerto,const char *remitente,unsigned int id, const char *texto) {
     struct sockaddr_in addr;
     int  sock;
-    char  buf[64];
+    char buf[64];
 
     sock = socket(AF_INET, SOCK_STREAM, 0);//creo el socket
     if (sock < 0) return -1;
@@ -351,8 +330,40 @@ int enviar_mensaje_a_cliente(const char *ip, int puerto,const char *remitente,un
     return 0;
 }
 
+//conecto al hilo de escucha del cliente destinatario y le envio un mensaje con fichero adjunto segun el protocolo 
+int enviar_mensaje_attach_a_cliente(const char *ip, int puerto,const char *remitente,unsigned int id, const char *texto,const char *filename) {
+    struct sockaddr_in addr;
+    int  sock;
+    char buf[64];
 
- // notifica al remitente de un mensaje que este ha isdo entregado correctamente 
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return -1;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(puerto);
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
+        close(sock);
+        return -1;
+    }
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* protocolo parte 2 seccion 2.3: operacion + remitente + id + texto + filename */
+    enviar_linea(sock, "SEND_MESSAGE_ATTACH");
+    enviar_linea(sock, remitente);
+    snprintf(buf, sizeof(buf), "%u", id);
+    enviar_linea(sock, buf);
+    enviar_linea(sock, texto);
+    enviar_linea(sock, filename);
+
+    close(sock);
+    return 0;
+}
+
+// notifica al remitente de un mensaje que este ha isdo entregado correctamente 
 int enviar_ack_remitente(NodoUsuario *nodo_rem, unsigned int id) {
     struct sockaddr_in addr;
     int   sock;
@@ -385,33 +396,65 @@ int enviar_ack_remitente(NodoUsuario *nodo_rem, unsigned int id) {
     return 0;
 }
 
-/*
- * Recorre la lista de mensajes pendientes del usuario 'nodo_dest'
- * e intenta entregarlos uno a uno.
- * Se llama justo despues de que el usuario se conecta (seccion 7.4).
- * Si un envio falla, marca al destinatario como desconectado y para.
- */
+//notifico al remitente de un mensaje con adjunto entregado
+int enviar_ack_attach_remitente(NodoUsuario *nodo_rem, unsigned int id,const char *filename) {
+    struct sockaddr_in addr;
+    int   sock;
+    char  buf[64];
+
+    /* si el remitente no esta conectado, descartamos el ACK (seccion 2.3) */
+    if (nodo_rem == NULL || nodo_rem->estado != CONECTADO) return 0;
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return -1;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(nodo_rem->puerto);
+    if (inet_pton(AF_INET, nodo_rem->ip, &addr.sin_addr) <= 0) {
+        close(sock);
+        return -1;
+    }
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* protocolo parte 2: SEND_MESS_ATTACH_ACK + id + filename */
+    enviar_linea(sock, "SEND_MESS_ATTACH_ACK");
+    snprintf(buf, sizeof(buf), "%u", id);
+    enviar_linea(sock, buf);
+    enviar_linea(sock, filename);
+
+    close(sock);
+    return 0;
+}
+
+
  //recorro la lista de mensajes pendientes del usuario destiantario y se llama justo despues de que el usuario se conecte
 void enviar_pendientes(NodoUsuario *nodo_dest) {
-    /* iteramos la lista de mensajes buscando los de este destinatario */
     while (1) {
         /* buscamos el primer mensaje pendiente para este usuario */
         pthread_mutex_lock(&mutex_mensajes);
         NodoMensaje *msg = lista_mensajes;
-        char          rem[MAX_NAME], dest[MAX_NAME], texto[MAX_MSG_TEXT];
-        unsigned int  id = 0;
-        int           encontrado = 0;
+        char         rem[MAX_NAME], dest[MAX_NAME];
+        char         texto[MAX_MSG_TEXT], fname[MAX_FILENAME];
+        unsigned int id = 0;
+        int          encontrado = 0;
+        int          tiene_adj  = 0;
 
         while (msg != NULL) {
             if (strcmp(msg->destino, nodo_dest->nombre) == 0) {
-                /* copiamos los datos para no mantener el mutex durante el envio */
                 strncpy(rem,   msg->remitente, MAX_NAME - 1);
                 strncpy(dest,  msg->destino,   MAX_NAME - 1);
                 strncpy(texto, msg->texto,      MAX_MSG_TEXT - 1);
-                rem[MAX_NAME - 1]        = '\0';
-                dest[MAX_NAME - 1]       = '\0';
-                texto[MAX_MSG_TEXT - 1]  = '\0';
-                id = msg->id;
+                strncpy(fname, msg->filename,   MAX_FILENAME - 1);
+                rem[MAX_NAME - 1]         = '\0';
+                dest[MAX_NAME - 1]        = '\0';
+                texto[MAX_MSG_TEXT - 1]   = '\0';
+                fname[MAX_FILENAME - 1]   = '\0';
+                id         = msg->id;
+                tiene_adj  = msg->tiene_adjunto;
                 encontrado = 1;
                 break;
             }
@@ -429,8 +472,12 @@ void enviar_pendientes(NodoUsuario *nodo_dest) {
         ip_dest[MAX_IP - 1] = '\0';
         pthread_mutex_unlock(&mutex_usuarios);
 
-        /* intentamos entregar el mensaje */
-        int ok = enviar_mensaje_a_cliente(ip_dest, puerto_dest, rem, id, texto);
+        /* intentamos entregar el mensaje segun si tiene adjunto o no */
+        int ok;
+        if (tiene_adj)
+            ok = enviar_mensaje_attach_a_cliente(ip_dest, puerto_dest,rem, id, texto, fname);
+        else
+            ok = enviar_mensaje_a_cliente(ip_dest, puerto_dest, rem, id, texto);
 
         if (ok == 0) {
             /* entregado con exito: log, borrado del almacen y ACK al remitente */
@@ -443,7 +490,10 @@ void enviar_pendientes(NodoUsuario *nodo_dest) {
 
             pthread_mutex_lock(&mutex_usuarios);
             NodoUsuario *nodo_rem = buscar_usuario(rem);
-            enviar_ack_remitente(nodo_rem, id);
+            if (tiene_adj)
+                enviar_ack_attach_remitente(nodo_rem, id, fname);
+            else
+                enviar_ack_remitente(nodo_rem, id);
             pthread_mutex_unlock(&mutex_usuarios);
 
         } else {
@@ -458,10 +508,10 @@ void enviar_pendientes(NodoUsuario *nodo_dest) {
     }
 }
 
-/* ahora haremos con la ayuda de las funciones previamente declaradas un las operaciones*/
+/* ===================== OPERACIONES DEL PROTOCOLO ===================== */
+//operaciones
 
-//register
- //registra un nuevo usuario en el sistema , siendo estos los errores 0=exito, 1=ya existe, 2=error generico
+//registra un nuevo usuario en el sistema , siendo estos los errores 0=exito, 1=ya existe, 2=error generico
 void op_register(int sock) {
     char nombre[MAX_NAME];
     if (readLine(sock, nombre, MAX_NAME) <= 0) {//se guarda primero el nombre
@@ -470,7 +520,6 @@ void op_register(int sock) {
     }
 
     pthread_mutex_lock(&mutex_usuarios);
-
     /* verificamos que no exista ya un usuario con ese nombre */
     if (buscar_usuario(nombre) != NULL) {
         pthread_mutex_unlock(&mutex_usuarios);
@@ -479,7 +528,6 @@ void op_register(int sock) {
         fflush(stdout);
         return;
     }
-
     /* insertamos el nuevo usuario en la lista */
     NodoUsuario *nuevo = insertar_usuario(nombre);
     pthread_mutex_unlock(&mutex_usuarios);
@@ -502,14 +550,13 @@ void op_register(int sock) {
 //da de baja a un usuario del sistema y borra sus mensajes pendientes
 void op_unregister(int sock) {
     char nombre[MAX_NAME];
-    if (readLine(sock, nombre, MAX_NAME) <= 0) {//guarda el nombre para luego buscar
+    if (readLine(sock, nombre, MAX_NAME) <= 0) {
         enviar_byte(sock, 2);
         return;
     }
 
     pthread_mutex_lock(&mutex_usuarios);
 
-    /* verificamos que el usuario exista */
     if (buscar_usuario(nombre) == NULL) {
         pthread_mutex_unlock(&mutex_usuarios);
         enviar_byte(sock, 1);
@@ -517,13 +564,11 @@ void op_unregister(int sock) {
         fflush(stdout);
         return;
     }
-
     /* borramos los mensajes pendientes de ese usuario antes de eliminarlo */
     pthread_mutex_lock(&mutex_mensajes);
     eliminar_mensajes_de(nombre);
     pthread_mutex_unlock(&mutex_mensajes);
 
-    /* eliminamos el nodo del usuario de la lista */
     eliminar_usuario(nombre);
     pthread_mutex_unlock(&mutex_usuarios);
 
@@ -532,20 +577,13 @@ void op_unregister(int sock) {
     fflush(stdout);
 }
 
-/* --- CONNECT --- */
-/*
- * Conecta al usuario al servicio: guarda su IP y puerto,
- * cambia su estado a CONECTADO y entrega mensajes pendientes.
- * Errores: 0=exito, 1=no existe, 2=ya conectado, 3=error generico.
- */
-
- //connect 
- //conecta al usuario al servicio y guarda su ip y su puerto los errores:0=exito, 1=no existe, 2=ya conectado, 3=error cualquiera.
+//connect 
+//conecta al usuario al servicio y guarda su ip y su puerto los errores:0=exito, 1=no existe, 2=ya conectado, 3=error cualquiera.
 void op_connect(int sock, const char *ip_cliente) {
     char nombre[MAX_NAME];
     char puerto_str[32];
 
-    if (readLine(sock, nombre,     MAX_NAME)        <= 0) { enviar_byte(sock, 3); return; }
+    if (readLine(sock, nombre,     MAX_NAME)           <= 0) { enviar_byte(sock, 3); return; }
     if (readLine(sock, puerto_str, sizeof(puerto_str)) <= 0) { enviar_byte(sock, 3); return; }
 
     int puerto = atoi(puerto_str);//paso a numero el puerto para guardarlo
@@ -580,13 +618,7 @@ void op_connect(int sock, const char *ip_cliente) {
     printf("s> CONNECT %s OK\n", nombre);
     fflush(stdout);
 
-    /*
-     * Entregamos los mensajes pendientes en el mismo hilo.
-     * Re-buscamos el nodo porque el puntero puede haber cambiado
-     * si otro hilo hubiera modificado la lista (aunque aqui es seguro
-     * porque el nombre garantiza unicidad).
-     */
-    //entrego los mensaje pendientes en el mismo hilo y rebusco por el puntero del nodo ha cambiado por si otro hilo lo ha cambiado
+    /* entregamos los mensajes pendientes en el mismo hilo */
     pthread_mutex_lock(&mutex_usuarios);
     nodo = buscar_usuario(nombre);
     pthread_mutex_unlock(&mutex_usuarios);
@@ -594,8 +626,7 @@ void op_connect(int sock, const char *ip_cliente) {
         enviar_pendientes(nodo);
 }
 
-
- //disconnect
+//disconnect
  //desconecnta al usuario con todo lo que eso conlleva siendo estos los errores 0=exito, 1=no existe, 2=no estaba conectado, 3=error generico.
 void op_disconnect(int sock) {
     char nombre[MAX_NAME];
@@ -634,51 +665,42 @@ void op_disconnect(int sock) {
     fflush(stdout);
 }
 
-/* --- SEND --- */
-/*
- * Almacena un mensaje y, si el destinatario esta conectado, lo entrega
- * inmediatamente notificando al remitente con un ACK.
- * Errores: 0=exito (+ id), 1=usuario no existe, 2=error generico.
- */
-
- //send 
- //almaceno un mensaje y si el destinatario esta conectado lo entrego
+//send 
+//almaceno un mensaje y si el destinatario esta conectado lo entrego
 void op_send(int sock) {
     char remitente[MAX_NAME];
     char destino[MAX_NAME];
     char texto[MAX_MSG_TEXT];
 
-    if (readLine(sock, remitente, MAX_NAME)     <= 0) { enviar_byte(sock, 2); return; }
-    if (readLine(sock, destino,   MAX_NAME)     <= 0) { enviar_byte(sock, 2); return; }
-    if (readLine(sock, texto,     MAX_MSG_TEXT)  < 0) { enviar_byte(sock, 2); return; }
+    if (readLine(sock, remitente, MAX_NAME)    <= 0) { enviar_byte(sock, 2); return; }
+    if (readLine(sock, destino,   MAX_NAME)    <= 0) { enviar_byte(sock, 2); return; }
+    if (readLine(sock, texto,     MAX_MSG_TEXT) < 0) { enviar_byte(sock, 2); return; }
 
     pthread_mutex_lock(&mutex_usuarios);
 
     NodoUsuario *nodo_rem  = buscar_usuario(remitente);
     NodoUsuario *nodo_dest = buscar_usuario(destino);
 
-    /* si alguno de los dos usuarios no existe, error 1 */
     if (nodo_rem == NULL || nodo_dest == NULL) {
         pthread_mutex_unlock(&mutex_usuarios);
         enviar_byte(sock, 1);
         return;
     }
 
-    /* asignamos identificador al mensaje (unsigned int, empieza en 1) */
+    /* asignamos identificador al mensaje */
     nodo_rem->ultimo_id++;
     if (nodo_rem->ultimo_id == 0)
-        nodo_rem->ultimo_id = 1; /* al desbordarse vuelve a 1 */
+        nodo_rem->ultimo_id = 1;
     unsigned int id = nodo_rem->ultimo_id;
 
     pthread_mutex_unlock(&mutex_usuarios);
 
-    /* almacenamos el mensaje en la lista enlazada */
+    /* almacenamos el mensaje (sin adjunto) */
     pthread_mutex_lock(&mutex_mensajes);
-    NodoMensaje *nodo_msg = insertar_mensaje(destino, remitente, id, texto);//insertamos el mensaje
+    NodoMensaje *nodo_msg = insertar_mensaje(destino, remitente, id, texto, "", 0);
     pthread_mutex_unlock(&mutex_mensajes);
 
     if (nodo_msg == NULL) {
-        /* fallo de malloc al crear el mensaje */
         enviar_byte(sock, 2);
         return;
     }
@@ -691,7 +713,7 @@ void op_send(int sock) {
 
     /* comprobamos si el destinatario esta conectado para entrega inmediata */
     pthread_mutex_lock(&mutex_usuarios);
-    nodo_dest = buscar_usuario(destino); /* re-buscamos por seguridad */
+    nodo_dest = buscar_usuario(destino);
     if (nodo_dest == NULL || nodo_dest->estado != CONECTADO) {
         pthread_mutex_unlock(&mutex_usuarios);
         printf("s> MESSAGE %u FROM %s TO %s STORED\n", id, remitente, destino);
@@ -699,7 +721,6 @@ void op_send(int sock) {
         return;
     }
 
-    /* copiamos IP y puerto antes de liberar el mutex */
     char ip_dest[MAX_IP];
     int  puerto_dest = nodo_dest->puerto;
     strncpy(ip_dest, nodo_dest->ip, MAX_IP - 1);
@@ -738,11 +759,100 @@ void op_send(int sock) {
     }
 }
 
-/* --- USERS --- */
-/*
- * Devuelve la lista de usuarios actualmente conectados.
- * Errores: 0=exito, 1=solicitante no conectado, 2=no registrado/error.
- */
+//sendattach almacena un mensaje con un fichero adjunto(su ruta) , si el distinatario esta conectado lo entrega como la seccion 2.2
+void op_sendattach(int sock) {
+    char remitente[MAX_NAME];
+    char destino[MAX_NAME];
+    char texto[MAX_MSG_TEXT];
+    char filename[MAX_FILENAME];
+
+    if (readLine(sock, remitente, MAX_NAME)       <= 0) { enviar_byte(sock, 2); return; }
+    if (readLine(sock, destino,   MAX_NAME)       <= 0) { enviar_byte(sock, 2); return; }
+    if (readLine(sock, texto,     MAX_MSG_TEXT)    < 0) { enviar_byte(sock, 2); return; }
+    if (readLine(sock, filename,  MAX_FILENAME)   <= 0) { enviar_byte(sock, 2); return; }
+
+    pthread_mutex_lock(&mutex_usuarios);
+
+    NodoUsuario *nodo_rem  = buscar_usuario(remitente);
+    NodoUsuario *nodo_dest = buscar_usuario(destino);
+
+    if (nodo_rem == NULL || nodo_dest == NULL) {
+        pthread_mutex_unlock(&mutex_usuarios);
+        enviar_byte(sock, 1);
+        return;
+    }
+
+    /* asignamos identificador al mensaje */
+    nodo_rem->ultimo_id++;
+    if (nodo_rem->ultimo_id == 0)
+        nodo_rem->ultimo_id = 1;
+    unsigned int id = nodo_rem->ultimo_id;
+
+    pthread_mutex_unlock(&mutex_usuarios);
+
+    /* almacenamos el mensaje con adjunto (tiene_adjunto = 1) */
+    pthread_mutex_lock(&mutex_mensajes);
+    NodoMensaje *nodo_msg = insertar_mensaje(destino, remitente, id, texto, filename, 1);
+    pthread_mutex_unlock(&mutex_mensajes);
+
+    if (nodo_msg == NULL) {
+        enviar_byte(sock, 2);
+        return;
+    }
+
+    /* respondemos al remitente con exito + identificador */
+    char id_str[32];
+    snprintf(id_str, sizeof(id_str), "%u", id);
+    enviar_byte(sock, 0);
+    enviar_linea(sock, id_str);
+
+    /* comprobamos si el destinatario esta conectado para entrega inmediata */
+    pthread_mutex_lock(&mutex_usuarios);
+    nodo_dest = buscar_usuario(destino);
+    if (nodo_dest == NULL || nodo_dest->estado != CONECTADO) {
+        pthread_mutex_unlock(&mutex_usuarios);
+        printf("s> MESSAGE %u FROM %s TO %s STORED\n", id, remitente, destino);
+        fflush(stdout);
+        return;
+    }
+
+    char ip_dest[MAX_IP];
+    int  puerto_dest = nodo_dest->puerto;
+    strncpy(ip_dest, nodo_dest->ip, MAX_IP - 1);
+    ip_dest[MAX_IP - 1] = '\0';
+    pthread_mutex_unlock(&mutex_usuarios);
+
+    /* intentamos entregar el mensaje con adjunto inmediatamente */
+    int ok = enviar_mensaje_attach_a_cliente(ip_dest, puerto_dest,remitente, id, texto, filename);
+
+    if (ok == 0) {
+        printf("s> SEND MESSAGE %u FROM %s TO %s\n", id, remitente, destino);
+        fflush(stdout);
+
+        pthread_mutex_lock(&mutex_mensajes);
+        eliminar_mensaje(destino, id);
+        pthread_mutex_unlock(&mutex_mensajes);
+
+        pthread_mutex_lock(&mutex_usuarios);
+        NodoUsuario *nodo_rem2 = buscar_usuario(remitente);
+        enviar_ack_attach_remitente(nodo_rem2, id, filename);
+        pthread_mutex_unlock(&mutex_usuarios);
+
+    } else {
+        /* fallo de envio: marcamos al destinatario como desconectado */
+        pthread_mutex_lock(&mutex_usuarios);
+        NodoUsuario *nodo_d2 = buscar_usuario(destino);
+        if (nodo_d2 != NULL) {
+            nodo_d2->estado = DESCONECTADO;
+            memset(nodo_d2->ip, 0, MAX_IP);
+            nodo_d2->puerto = 0;
+        }
+        pthread_mutex_unlock(&mutex_usuarios);
+        printf("s> MESSAGE %u FROM %s TO %s STORED\n", id, remitente, destino);
+        fflush(stdout);
+    }
+}
+
 //users
 //devuelve la lista de usuarios actualmente conectados con estos errores: 0=exito, 1=solicitante no conectado, 2=no registrado/error.
 void op_users(int sock) {
@@ -756,14 +866,13 @@ void op_users(int sock) {
 
     NodoUsuario *nodo = buscar_usuario(nombre);
     if (nodo == NULL) {
-        /* no registrado -> error tipo 2 segun seccion 7.7 */
         pthread_mutex_unlock(&mutex_usuarios);
         enviar_byte(sock, 2);
         printf("s> CONNECTEDUSERS FAIL\n");
         fflush(stdout);
         return;
     }
-    //si el usuaruo no esta conectado
+
     if (nodo->estado != CONECTADO) {
         pthread_mutex_unlock(&mutex_usuarios);
         enviar_byte(sock, 1);
@@ -772,12 +881,7 @@ void op_users(int sock) {
         return;
     }
 
-    /*
-     * Recopilamos los nombres de los usuarios conectados.
-     * Usamos un array dinamico para no mantener el mutex durante el envio.
-     * Reservamos espacio suficiente recorriendo primero la lista.
-     */
-     //recopilo los nombres de los usuarios conectados y usamos un array dinamico , primero saco la cantidad de conectados para reservar la memoria
+    /* contamos cuantos usuarios estan conectados */
     int n = 0;
     NodoUsuario *actual = lista_usuarios;
     while (actual != NULL) {
@@ -785,8 +889,9 @@ void op_users(int sock) {
         actual = actual->siguiente;
     }
 
-    /* reservamos un array de n cadenas */
-    char (*conectados)[MAX_NAME] = malloc((size_t)n * sizeof(*conectados));
+    //reservo un array de cadenas para poder almacenar entradas con el formate que pide en la seccion 2.4
+    int  entry_size = MAX_NAME + MAX_IP + 32;
+    char (*conectados)[MAX_NAME + MAX_IP + 32] = malloc((size_t)n * entry_size);
     if (conectados == NULL) {
         pthread_mutex_unlock(&mutex_usuarios);
         enviar_byte(sock, 2);
@@ -796,19 +901,19 @@ void op_users(int sock) {
     }
 
     int idx = 0;
-    actual = lista_usuarios;//recorro la lista y guardo los nombres de los usuarios conectados en el array dinamico 
+    actual = lista_usuarios;
     while (actual != NULL) {
         if (actual->estado == CONECTADO) {
-            strncpy(conectados[idx], actual->nombre, MAX_NAME - 1);
-            conectados[idx][MAX_NAME - 1] = '\0';
+            /* formato: "nombre :: IP :: puerto" */
+            snprintf(conectados[idx], entry_size, "%s :: %s :: %d",
+                     actual->nombre, actual->ip, actual->puerto);
             idx++;
         }
         actual = actual->siguiente;
     }
     pthread_mutex_unlock(&mutex_usuarios);
 
-    /* enviamos: byte 0, numero de conectados y luego cada nombre */
-    //enviamos el byte 0 y el numero de conecatdos ademas de cada nombre
+    /* enviamos: byte 0, numero de conectados y luego cada entrada */
     char buf[32];
     enviar_byte(sock, 0);
     snprintf(buf, sizeof(buf), "%d", n);
@@ -821,17 +926,12 @@ void op_users(int sock) {
     fflush(stdout);
 }
 
-//un hilo por cada cliente que se cree
+//funcion del hilo por cliente
 
-/*
- * Funcion que ejecuta cada hilo.
- * Recibe el socket de la conexion aceptada como argumento.
- * Lee la operacion y la despacha al handler correspondiente.
- */
-//esta sera la funcion que ejecute cada hilo 
-void *procesar_cliente(void *arg) {//pasas el socket a sock desde su reserva de memoria hasta el valor del socket ya luego liberas
-    int *psock  = (int *)arg;
-    int  sock   = *psock;
+//la funcion que ejecuta cada hilo recibe el socket de la conexion aceptada como argumento lee la operacion y luego decide
+void *procesar_cliente(void *arg) {
+    int *psock = (int *)arg;
+    int  sock  = *psock;
     free(psock);
 
     /* obtenemos la IP del cliente con getpeername */
@@ -849,19 +949,20 @@ void *procesar_cliente(void *arg) {//pasas el socket a sock desde su reserva de 
     }
 
     /* despachamos segun la operacion recibida */
-    if      (strcmp(op, "REGISTER")   == 0) op_register(sock);
-    else if (strcmp(op, "UNREGISTER") == 0) op_unregister(sock);
-    else if (strcmp(op, "CONNECT")    == 0) op_connect(sock, ip_cliente);
-    else if (strcmp(op, "DISCONNECT") == 0) op_disconnect(sock);
-    else if (strcmp(op, "SEND")       == 0) op_send(sock);
-    else if (strcmp(op, "USERS")      == 0) op_users(sock);
-    else                                     enviar_byte(sock, 2);
+    if      (strcmp(op, "REGISTER")    == 0) op_register(sock);
+    else if (strcmp(op, "UNREGISTER")  == 0) op_unregister(sock);
+    else if (strcmp(op, "CONNECT")     == 0) op_connect(sock, ip_cliente);
+    else if (strcmp(op, "DISCONNECT")  == 0) op_disconnect(sock);
+    else if (strcmp(op, "SEND")        == 0) op_send(sock);
+    else if (strcmp(op, "SENDATTACH")  == 0) op_sendattach(sock);
+    else if (strcmp(op, "USERS")       == 0) op_users(sock);
+    else                                      enviar_byte(sock, 2);
 
     close(sock);
     return NULL;
 }
 
-/* ===================== MAIN ===================== */
+//main
 
 int main(int argc, char *argv[]) {
     int port = -1;
@@ -913,11 +1014,10 @@ int main(int argc, char *argv[]) {
         struct sockaddr_in cliente_addr;
         socklen_t len = sizeof(cliente_addr);
 
-        /* reservamos memoria para el descriptor de socket de cada cliente */
         int *cliente_sock = malloc(sizeof(int));
         if (!cliente_sock) continue;
 
-            *cliente_sock = accept(servidor, (struct sockaddr *)&cliente_addr, &len);
+        *cliente_sock = accept(servidor, (struct sockaddr *)&cliente_addr, &len);
         if (*cliente_sock < 0) {
             free(cliente_sock);
             continue;
