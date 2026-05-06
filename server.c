@@ -25,28 +25,24 @@
 #include <signal.h>
 #include <ifaddrs.h>
 
-/* ===================== CONSTANTES ===================== */
+//constantes
 #define MAX_NAME     256
 #define MAX_MSG_TEXT 256
 #define MAX_FILENAME 256
 #define MAX_IP       64
 
-/* ===================== ESTRUCTURAS ===================== */
+//aqui desarollare las estructuras
 
 /* Estado posible de un usuario */
 typedef enum { DESCONECTADO, CONECTADO } EstadoUsuario;
 
-/*
- * Nodo de la lista enlazada de usuarios.
- * Cada nodo contiene la informacion de un usuario registrado
- * y un puntero al siguiente nodo.
- */
+//nodo de la lista enlazada de usuarios, cada nodo contiene la informacion de un usuario registrado y un puntero al siguiente usuario
 typedef struct NodoUsuario {
-    char              nombre[MAX_NAME];
-    EstadoUsuario     estado;
-    char              ip[MAX_IP];
-    int               puerto;
-    unsigned int      ultimo_id; /* ultimo identificador de mensaje asignado */
+    char nombre[MAX_NAME];
+    EstadoUsuario estado;
+    char ip[MAX_IP];
+    int puerto;
+    unsigned int ultimo_id; /* ultimo identificador de mensaje asignado */
     struct NodoUsuario *siguiente;
 } NodoUsuario;
 
@@ -56,17 +52,16 @@ typedef struct NodoUsuario {
  * El campo filename estara vacio si el mensaje no tiene adjunto.
  * El campo tiene_adjunto indica si es un SENDATTACH o un SEND normal.
  */
+// nodo de la lista enlazada de mensajes pendientes, cada nodo almacena un mensaje pendiente de entrega
 typedef struct NodoMensaje {
-    char             destino[MAX_NAME];        /* usuario destinatario */
-    char             remitente[MAX_NAME];      /* usuario que lo envio */
-    unsigned int     id;                       /* identificador del mensaje */
-    char             texto[MAX_MSG_TEXT];      /* contenido del mensaje */
-    char             filename[MAX_FILENAME];   /* nombre del fichero adjunto (puede ser "") */
-    int              tiene_adjunto;            /* 1 si es SENDATTACH, 0 si es SEND */
+    char destino[MAX_NAME];   /* usuario destinatario */
+    char remitente[MAX_NAME];  /* usuario que lo envio */
+    unsigned int id;  /* identificador del mensaje */
+    char texto[MAX_MSG_TEXT];  /* contenido del mensaje */
+    char filename[MAX_FILENAME]; /* nombre del fichero adjunto (puede ser "") */
+    int tiene_adjunto;  /* 1 si es SENDATTACH, 0 si es SEND */
     struct NodoMensaje *siguiente;
 } NodoMensaje;
-
-/* ===================== ESTADO GLOBAL ===================== */
 
 /* Cabeceras de las listas enlazadas */
 NodoUsuario *lista_usuarios = NULL;
@@ -76,7 +71,7 @@ NodoMensaje *lista_mensajes = NULL;
 pthread_mutex_t mutex_usuarios = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_mensajes = PTHREAD_MUTEX_INITIALIZER;
 
-/* ===================== FUNCIONES DE RED ===================== */
+//las funciones de red dadas en clsae
 
 /*
  * Envia todos los bytes del buffer,
@@ -157,8 +152,7 @@ int enviar_linea(int sock, const char *texto) {
 int enviar_byte(int sock, unsigned char valor) {
     return sendMessage(sock, (char *)&valor, 1);
 }
-
-/* ===================== GESTION DE LA LISTA DE USUARIOS ===================== */
+//aqui gestionamos la lista de usuarios
 
 //buscamos a un usuario por nombre en la lista enlazada y devuelve un puntero hacia el o null
 NodoUsuario *buscar_usuario(const char *nombre) {
@@ -212,25 +206,23 @@ int eliminar_usuario(const char *nombre) {
 //gestion de la lista de mensajes
 
 //creo un nuevo nodo de mensaje e inserto al princpio de la lista
-NodoMensaje *insertar_mensaje(const char *destino, const char *remitente,
-                               unsigned int id, const char *texto,
-                               const char *filename, int tiene_adjunto) {
+NodoMensaje *insertar_mensaje(const char *destino, const char *remitente,unsigned int id, const char *texto,const char *filename, int tiene_adjunto) {
 
     NodoMensaje *nuevo = malloc(sizeof(NodoMensaje));
     if (nuevo == NULL) return NULL;
 
-    strncpy(nuevo->destino,   destino,   MAX_NAME - 1);
-    strncpy(nuevo->remitente, remitente, MAX_NAME - 1);
-    strncpy(nuevo->texto,     texto,     MAX_MSG_TEXT - 1);
-    strncpy(nuevo->filename,  filename,  MAX_FILENAME - 1);
-    nuevo->destino[MAX_NAME - 1]     = '\0';//pongo un \0 por si es un elemento mayor
-    nuevo->remitente[MAX_NAME - 1]   = '\0';//pongo un \0 por si es un elemento mayor
-    nuevo->texto[MAX_MSG_TEXT - 1]   = '\0';//pongo un \0 por si es un elemento mayor
+    strncpy(nuevo->destino,destino,MAX_NAME - 1);
+    strncpy(nuevo->remitente,remitente, MAX_NAME - 1);
+    strncpy(nuevo->texto,texto, MAX_MSG_TEXT - 1);
+    strncpy(nuevo->filename,filename, MAX_FILENAME - 1);
+    nuevo->destino[MAX_NAME - 1] = '\0';//pongo un \0 por si es un elemento mayor
+    nuevo->remitente[MAX_NAME - 1] = '\0';//pongo un \0 por si es un elemento mayor
+    nuevo->texto[MAX_MSG_TEXT - 1] = '\0';//pongo un \0 por si es un elemento mayor
     nuevo->filename[MAX_FILENAME - 1] = '\0';//pongo un \0 por si es un elemento mayor
-    nuevo->id             = id;
+    nuevo->id = id;
     nuevo->tiene_adjunto  = tiene_adjunto;
-    nuevo->siguiente      = lista_mensajes;//inserto el nodo en la lista 
-    lista_mensajes        = nuevo;//hago que la lista apunte a este nodo
+    nuevo->siguiente  = lista_mensajes;//inserto el nodo en la lista 
+    lista_mensajes  = nuevo;//hago que la lista apunte a este nodo
     return nuevo;
 }
 
@@ -508,7 +500,6 @@ void enviar_pendientes(NodoUsuario *nodo_dest) {
     }
 }
 
-/* ===================== OPERACIONES DEL PROTOCOLO ===================== */
 //operaciones
 
 //registra un nuevo usuario en el sistema , siendo estos los errores 0=exito, 1=ya existe, 2=error generico
@@ -583,7 +574,7 @@ void op_connect(int sock, const char *ip_cliente) {
     char nombre[MAX_NAME];
     char puerto_str[32];
 
-    if (readLine(sock, nombre,     MAX_NAME)           <= 0) { enviar_byte(sock, 3); return; }
+    if (readLine(sock, nombre,     MAX_NAME) <= 0) { enviar_byte(sock, 3); return; }
     if (readLine(sock, puerto_str, sizeof(puerto_str)) <= 0) { enviar_byte(sock, 3); return; }
 
     int puerto = atoi(puerto_str);//paso a numero el puerto para guardarlo
@@ -672,8 +663,8 @@ void op_send(int sock) {
     char destino[MAX_NAME];
     char texto[MAX_MSG_TEXT];
 
-    if (readLine(sock, remitente, MAX_NAME)    <= 0) { enviar_byte(sock, 2); return; }
-    if (readLine(sock, destino,   MAX_NAME)    <= 0) { enviar_byte(sock, 2); return; }
+    if (readLine(sock, remitente, MAX_NAME) <= 0) { enviar_byte(sock, 2); return; }
+    if (readLine(sock, destino,   MAX_NAME) <= 0) { enviar_byte(sock, 2); return; }
     if (readLine(sock, texto,     MAX_MSG_TEXT) < 0) { enviar_byte(sock, 2); return; }
 
     pthread_mutex_lock(&mutex_usuarios);
@@ -766,10 +757,10 @@ void op_sendattach(int sock) {
     char texto[MAX_MSG_TEXT];
     char filename[MAX_FILENAME];
 
-    if (readLine(sock, remitente, MAX_NAME)       <= 0) { enviar_byte(sock, 2); return; }
-    if (readLine(sock, destino,   MAX_NAME)       <= 0) { enviar_byte(sock, 2); return; }
-    if (readLine(sock, texto,     MAX_MSG_TEXT)    < 0) { enviar_byte(sock, 2); return; }
-    if (readLine(sock, filename,  MAX_FILENAME)   <= 0) { enviar_byte(sock, 2); return; }
+    if (readLine(sock, remitente, MAX_NAME) <= 0) { enviar_byte(sock, 2); return; }
+    if (readLine(sock, destino, MAX_NAME) <= 0) { enviar_byte(sock, 2); return; }
+    if (readLine(sock, texto, MAX_MSG_TEXT) < 0) { enviar_byte(sock, 2); return; }
+    if (readLine(sock, filename, MAX_FILENAME) <= 0) { enviar_byte(sock, 2); return; }
 
     pthread_mutex_lock(&mutex_usuarios);
 
